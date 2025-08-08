@@ -135,8 +135,9 @@ func main() {
 			break
 		}
 		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine == "exit" {
+		if trimmedLine == "exit" || trimmedLine == "quit" || trimmedLine == "q" {
 			break
+		
 		} else if path, ok := dirMap[trimmedLine]; ok {
 			println("Full path:", path)
 			cmd := exec.Command("code", path)
