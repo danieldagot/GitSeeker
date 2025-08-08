@@ -20,9 +20,11 @@ type Directory struct {
 }
 
 var verboseFlag bool
+var listFlag bool
 
 func main() {
 	flag.BoolVar(&verboseFlag, "ver", false, "Enable verbose logging")
+	flag.BoolVar(&listFlag, "l", false, "List all Git repositories and exit")
 	flag.Parse()
 
 	currentUser, err := user.Current()
@@ -99,6 +101,15 @@ func main() {
 		println("Total projects found:", projectCount)
 	}
 
+	// If list flag is set, print all repositories and exit
+	if listFlag {
+		println("Found Git repositories:")
+		for _, dir := range gitDirs {
+			println(dir.Name)
+		}
+		
+	}
+
 	// Map to hold directory name to path mapping
 	dirMap := make(map[string]string)
 	var completerItems []readline.PrefixCompleterInterface
@@ -137,7 +148,7 @@ func main() {
 		trimmedLine := strings.TrimSpace(line)
 		if trimmedLine == "exit" || trimmedLine == "quit" || trimmedLine == "q" {
 			break
-		
+
 		} else if path, ok := dirMap[trimmedLine]; ok {
 			println("Full path:", path)
 			cmd := exec.Command("code", path)
