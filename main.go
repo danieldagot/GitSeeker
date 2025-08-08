@@ -2,183 +2,427 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"log"
 	"os"
 	"os/exec"
-	"os/user"
-	"path/filepath"
+	"os/signal"
+	"sort"
 	"strings"
-	"sync"
-	"time"
+	"syscall"
+
+	"workspace/utils"
 
 	"github.com/chzyer/readline"
 )
 
 // Directory struct to hold the name and path
-type Directory struct {
-	Name string
-	Path string
-}
+type Directory = utils.Directory
+type ScanStats = utils.ScanStats
+type Config = utils.Config
+type Scanner = utils.Scanner
 
-var verboseFlag bool
-var listFlag bool
+var (
+	verboseFlag  bool
+	listFlag     bool
+	configFlag   bool
+	cacheFlag    bool
+	refreshFlag  bool
+	editorFlag   string
+	maxDepthFlag int
+)
 
 func main() {
 	flag.BoolVar(&verboseFlag, "ver", false, "Enable verbose logging")
+	flag.BoolVar(&verboseFlag, "v", false, "Enable verbose logging (short)")
 	flag.BoolVar(&listFlag, "l", false, "List all Git repositories and exit")
+	flag.BoolVar(&listFlag, "list", false, "List all Git repositories and exit")
+	flag.BoolVar(&configFlag, "config", false, "Show configuration file location and exit")
+	flag.BoolVar(&cacheFlag, "cache", false, "Use cached results (faster startup)")
+	flag.BoolVar(&refreshFlag, "refresh", false, "Force refresh cache")
+	flag.StringVar(&editorFlag, "editor", "", "Override default editor (e.g., 'code', 'subl', 'vim')")
+	flag.IntVar(&maxDepthFlag, "depth", 0, "Maximum scan depth (0 = use config default)")
 	flag.Parse()
 
-	currentUser, err := user.Current()
+	// Load configuration
+	config, err := utils.LoadConfig()
 	if err != nil {
-		panic(err)
+		log.Printf("Warning: Failed to load config, using defaults: %v", err)
+		config = utils.GetDefaultConfig()
 	}
-	var folderCount, projectCount int
-	startTime := time.Now()
 
-	documentsDir := filepath.Join(currentUser.HomeDir, "Documents")
-	desktopDir := filepath.Join(currentUser.HomeDir, "Desktop")
+	// Override config with command line flags
+	if editorFlag != "" {
+		config.Editor = editorFlag
+	}
+	if maxDepthFlag > 0 {
+		config.MaxDepth = maxDepthFlag
+	}
 
-	var gitDirs []Directory
-	var wg sync.WaitGroup
-	dirChan := make(chan Directory)
+	// Handle config flag
+	if configFlag {
+		showConfigInfo(config)
+		return
+	}
 
-	// Goroutine to collect directories
-	go func() {
-		for dir := range dirChan {
-			gitDirs = append(gitDirs, dir)
-		}
-	}()
+	// Setup graceful shutdown
+	scanner := utils.NewScanner(config, verboseFlag)
+	setupGracefulShutdown(scanner)
 
-	// Function to scan directories
-	scanDir := func(path string, info os.FileInfo, err error) error {
-		if info != nil && info.IsDir() {
-			dirName := info.Name()
-
-			// Skip directories starting with "." except for ".git"
-			if strings.HasPrefix(dirName, ".") && dirName != ".git" {
-				return filepath.SkipDir
-			}
-
-			// List of directories to skip
-			skipDirs := []string{"node_modules", "src", "dist", "deploy_node_modules", ".serverless", ".github", "config", "features", "build", "bin", "lib", "logs", "tmp", "temp", "env", "venv", ".vscode", ".idea", "public", "utils", ".esbuild", "settings", "secrets", "dagrams", "export", "images", "data", "test", "tests", "doc", "docs", "distros", "demo", "demos", "examples", "backup", "scripts", "assets", "archive", "installers", "locale", "install", "logs", "packages", "resources", "themes", "translations", "uploads", "videos", "webroot"}
-			folderCount++ // Increment folder count
-
-			// Check if the current directory is in the list of directories to skip
-			for _, skipDir := range skipDirs {
-				if dirName == skipDir {
-					return filepath.SkipDir
-				}
-			}
+	// Scan for repositories
+	var result utils.ScanResult
+	if cacheFlag && !refreshFlag {
+		if cached := utils.LoadCache(); cached != nil && len(cached.Repositories) > 0 {
+			result = *cached
 			if verboseFlag {
-				println("Scanning directory:", path) // Conditionally print
+				fmt.Println("Using cached results...")
 			}
-			if info.Name() == ".git" {
-				// Create a Directory struct and send it over the channel
-				dir := Directory{
-					Name: filepath.Base(filepath.Dir(path)),
-					Path: filepath.Dir(path),
-				}
-				projectCount++ // Increment project count
-				dirChan <- dir
-				return filepath.SkipDir
-			}
+		} else {
+			result = scanner.ScanRepositories()
+			utils.SaveCache(&result)
 		}
-		return nil
+	} else {
+		result = scanner.ScanRepositories()
+		if cacheFlag {
+			utils.SaveCache(&result)
+		}
 	}
 
-	// Scan both directories
-	scanAndProcessDirectory(documentsDir, &wg, dirChan, scanDir)
-	scanAndProcessDirectory(desktopDir, &wg, dirChan, scanDir)
-
-	// Wait for all goroutines to complete
-	wg.Wait()
-	close(dirChan)
-	endTime := time.Now()
-	scanDuration := endTime.Sub(startTime)
+	if result.Error != nil {
+		log.Fatal("Scan failed:", result.Error)
+	}
 
 	if verboseFlag {
-		println("Scanning completed in:", scanDuration.Milliseconds(), "milliseconds")
-		println("Total folders scanned:", folderCount)
-		println("Total projects found:", projectCount)
+		printScanStats(result.Stats)
 	}
 
-	// If list flag is set, print all repositories and exit
+	if len(result.Repositories) == 0 {
+		fmt.Println("No Git repositories found in configured scan paths.")
+		fmt.Printf("Scan paths: %v\n", config.ScanPaths)
+		fmt.Println("Run with -config to see configuration file location.")
+		return
+	}
+
+	// Sort repositories by name for better UX
+	sort.Slice(result.Repositories, func(i, j int) bool {
+		return strings.ToLower(result.Repositories[i].Name) < strings.ToLower(result.Repositories[j].Name)
+	})
+
+	// Handle list flag
 	if listFlag {
-		println("Found Git repositories:")
-		for _, dir := range gitDirs {
-			println(dir.Name)
+		fmt.Printf("Found %d Git repositories:\n", len(result.Repositories))
+		for i, dir := range result.Repositories {
+			fmt.Printf("%3d. %s\n     %s\n", i+1, dir.Name, dir.Path)
 		}
-		
+		return
 	}
 
-	// Map to hold directory name to path mapping
+	// Start interactive mode
+	startInteractiveMode(result.Repositories, config)
+}
+
+func startInteractiveMode(repos []Directory, config utils.Config) {
+	// Create directory map and completer items
 	dirMap := make(map[string]string)
 	var completerItems []readline.PrefixCompleterInterface
 
-	for _, dir := range gitDirs {
+	for _, dir := range repos {
 		dirMap[dir.Name] = dir.Path
 		completerItems = append(completerItems, readline.PcItem(dir.Name))
 	}
 
-	// Create the completer with the collected items
-	completer := readline.NewPrefixCompleter(completerItems...)
-	const (
-		colorGreen = "\033[32m"
-		colorReset = "\033[0m"
+	// Add command completions
+	commandCompleter := readline.NewPrefixCompleter(
+		readline.PcItem("help"),
+		readline.PcItem("list"),
+		readline.PcItem("config"),
+		readline.PcItem("refresh"),
+		readline.PcItem("exit"),
+		readline.PcItem("quit"),
 	)
 
-	// Setup readline
+	// Combine project and command completers
+	allCompleters := append(completerItems, commandCompleter.Children...)
+	completer := readline.NewPrefixCompleter(allCompleters...)
+
+	const (
+		colorGreen  = "\033[32m"
+		colorReset  = "\033[0m"
+		colorRed    = "\033[31m"
+		colorYellow = "\033[33m"
+		colorBlue   = "\033[34m"
+		colorCyan   = "\033[36m"
+		colorGray   = "\033[90m"
+	)
+
+	// Setup readline with enhanced completer
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          colorGreen + "Enter project name: " + colorReset,
+		Prompt:          colorGreen + "GitSeeker> " + colorReset,
 		AutoComplete:    completer,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
+		HistoryFile:     getHistoryFile(),
 	})
 
 	if err != nil {
-		panic(err)
+		log.Fatal("Failed to initialize readline:", err)
 	}
 	defer rl.Close()
 
-	// Readline loop
+	fmt.Printf("%sFound %d Git repositories.%s Type a project name and press Tab for autocompletion.\n",
+		colorBlue, len(repos), colorReset)
+	fmt.Printf("Type '%shelp%s' for available commands.\n", colorYellow, colorReset)
+	fmt.Printf("%sPress Tab twice for suggestions, or type a few letters and press Tab!%s\n\n", colorCyan, colorReset)
+
+	// Interactive loop with enhanced input handling
 	for {
 		line, err := rl.Readline()
-		if err != nil { // io.EOF, readline.ErrInterrupt
+		if err != nil {
 			break
 		}
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine == "exit" || trimmedLine == "quit" || trimmedLine == "q" {
-			break
 
-		} else if path, ok := dirMap[trimmedLine]; ok {
-			println("Full path:", path)
-			cmd := exec.Command("code", path)
-			err := cmd.Start()
-			if err != nil {
-				println("Error opening VS Code:", err)
-			} else {
-				println("Opened VS Code at path:", path)
-				break
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
+			continue
+		}
+
+		// Show live suggestions for partial input
+		if len(trimmedLine) > 0 && !isCommand(trimmedLine) {
+			if _, exists := dirMap[trimmedLine]; !exists {
+				suggestions := findSimilarNames(trimmedLine, repos)
+				fmt.Printf("suggestions: %s\n", suggestions) 
+				if len(suggestions) > 0 {
+					fmt.Printf("%sMatching repositories:%s %s%s%s\n",
+						colorGray, colorReset, colorCyan, strings.Join(suggestions, ", "), colorReset)
+					if len(suggestions) <= 1 {
+						fmt.Printf("%sPress Tab to autocomplete or type the full name%s\n", colorGray, colorReset)
+					} else {
+						fmt.Printf("%sPress Tab to autocomplete or be more specific%s\n", colorGray, colorReset)
+					}
+					continue
+				}
 			}
-		} else {
-			println("You entered:", trimmedLine)
+		}
+
+		switch trimmedLine {
+		case "exit", "quit", "q":
+			fmt.Println("Goodbye!")
+			return
+
+		case "help", "h":
+			printHelp()
+
+		case "list":
+			fmt.Printf("\n%sAvailable repositories:%s\n", colorBlue, colorReset)
+			for i, dir := range repos {
+				fmt.Printf("%3d. %s\n     %s%s%s\n", i+1, dir.Name, colorYellow, dir.Path, colorReset)
+			}
+			fmt.Println()
+
+		case "config":
+			showConfigInfo(config)
+
+		case "refresh":
+			fmt.Println("Refreshing repository list...")
+			scanner := utils.NewScanner(config, verboseFlag)
+			result := scanner.ScanRepositories()
+			if result.Error != nil {
+				fmt.Printf("%sError refreshing: %v%s\n", colorRed, result.Error, colorReset)
+			} else {
+				repos = result.Repositories
+				sort.Slice(repos, func(i, j int) bool {
+					return strings.ToLower(repos[i].Name) < strings.ToLower(repos[j].Name)
+				})
+
+				// Update completer and map
+				dirMap = make(map[string]string)
+				completerItems = nil
+				for _, dir := range repos {
+					dirMap[dir.Name] = dir.Path
+					completerItems = append(completerItems, readline.PcItem(dir.Name))
+				}
+
+				fmt.Printf("%sFound %d repositories%s\n", colorGreen, len(repos), colorReset)
+				utils.SaveCache(&result)
+			}
+
+		default:
+			if path, ok := dirMap[trimmedLine]; ok {
+				fmt.Printf("Opening %s at: %s\n", config.Editor, path)
+				if err := openInEditor(path, config.Editor); err != nil {
+					fmt.Printf("%sError opening %s: %v%s\n", colorRed, config.Editor, err, colorReset)
+					fmt.Printf("Make sure %s is installed and available in PATH\n", config.Editor)
+				} else {
+					fmt.Printf("%sSuccessfully opened project: %s%s\n", colorGreen, trimmedLine, colorReset)
+					return
+				}
+			} else {
+				fmt.Printf("%sProject '%s' not found.%s\n", colorRed, trimmedLine, colorReset)
+
+				// Suggest similar names
+				suggestions := findSimilarNames(trimmedLine, repos)
+				if len(suggestions) > 0 {
+					fmt.Printf("%sDid you mean:%s %s%s%s\n", colorYellow, colorReset, colorGreen, strings.Join(suggestions, ", "), colorReset)
+				}
+				fmt.Printf("Use Tab for autocompletion or type '%slist%s' to see all projects.\n", colorYellow, colorReset)
+			}
 		}
 	}
 }
 
-func scanAndProcessDirectory(directoryPath string, wg *sync.WaitGroup, dirChan chan<- Directory, scanDirFn filepath.WalkFunc) {
-	entries, err := os.ReadDir(directoryPath)
-	if err != nil {
-		panic(err)
-	}
+func openInEditor(path, editor string) error {
+	cmd := exec.Command(editor, path)
+	return cmd.Start()
+}
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			wg.Add(1)
-			go func(entry os.DirEntry) {
-				defer wg.Done()
-				subDirPath := filepath.Join(directoryPath, entry.Name())
-				filepath.Walk(subDirPath, scanDirFn)
-			}(entry)
+func printHelp() {
+	const (
+		colorYellow = "\033[33m"
+		colorReset  = "\033[0m"
+		colorGreen  = "\033[32m"
+	)
+
+	fmt.Printf("\n%sAvailable Commands:%s\n", colorYellow, colorReset)
+	fmt.Printf("  %shelp, h%s        - Show this help\n", colorGreen, colorReset)
+	fmt.Printf("  %slist%s           - List all repositories\n", colorGreen, colorReset)
+	fmt.Printf("  %sconfig%s         - Show configuration info\n", colorGreen, colorReset)
+	fmt.Printf("  %srefresh%s        - Refresh repository list\n", colorGreen, colorReset)
+	fmt.Printf("  %sexit, quit, q%s  - Exit the program\n", colorGreen, colorReset)
+	fmt.Printf("  %s<project-name>%s - Open project in configured editor\n", colorGreen, colorReset)
+	fmt.Printf("\n%sUse Tab for autocompletion of project names.%s\n\n", colorYellow, colorReset)
+}
+
+func printScanStats(stats ScanStats) {
+	fmt.Printf("Scan completed in: %v\n", stats.Duration)
+	fmt.Printf("Folders scanned: %d\n", stats.FoldersScanned)
+	fmt.Printf("Repositories found: %d\n", stats.ReposFound)
+	if stats.ErrorsIgnored > 0 {
+		fmt.Printf("Warnings/errors ignored: %d\n", stats.ErrorsIgnored)
+	}
+	fmt.Println()
+}
+
+func showConfigInfo(config Config) {
+	homeDir, _ := os.UserHomeDir()
+	configPath := fmt.Sprintf("%s/.gitseeker/config.json", homeDir)
+
+	fmt.Printf("Configuration file: %s\n", configPath)
+	fmt.Printf("Editor: %s\n", config.Editor)
+	fmt.Printf("Max depth: %d\n", config.MaxDepth)
+	fmt.Printf("Include hidden: %t\n", config.IncludeHidden)
+	fmt.Printf("Scan paths: %v\n", config.ScanPaths)
+	fmt.Printf("Skip directories: %v\n", config.SkipDirs)
+}
+
+func setupGracefulShutdown(scanner *Scanner) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-c
+		fmt.Println("\nReceived interrupt signal, stopping scan...")
+		scanner.Stop()
+		os.Exit(0)
+	}()
+}
+
+func getHistoryFile() string {
+	homeDir, _ := os.UserHomeDir()
+	historyDir := fmt.Sprintf("%s/.gitseeker", homeDir)
+	os.MkdirAll(historyDir, 0755)
+	return fmt.Sprintf("%s/history", historyDir)
+}
+
+func findSimilarNames(input string, repos []Directory) []string {
+	var suggestions []string
+	input = strings.ToLower(input)
+
+	// First, try exact prefix matches
+	for _, repo := range repos {
+		repoName := strings.ToLower(repo.Name)
+		if strings.HasPrefix(repoName, input) {
+			suggestions = append(suggestions, repo.Name)
 		}
 	}
+
+	// If we have enough suggestions, return them
+	if len(suggestions) >= 3 {
+		return suggestions[:3]
+	}
+
+	// Then try contains matches (current behavior)
+	for _, repo := range repos {
+		repoName := strings.ToLower(repo.Name)
+		if strings.Contains(repoName, input) || strings.Contains(input, repoName) {
+			// Avoid duplicates
+			found := false
+			for _, existing := range suggestions {
+				if existing == repo.Name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				suggestions = append(suggestions, repo.Name)
+				if len(suggestions) >= 5 { // Increased limit for better fuzzy matching
+					break
+				}
+			}
+		}
+	}
+
+	// Finally, try fuzzy matching by individual characters
+	if len(suggestions) < 3 {
+		for _, repo := range repos {
+			repoName := strings.ToLower(repo.Name)
+			if fuzzyMatch(input, repoName) {
+				// Avoid duplicates
+				found := false
+				for _, existing := range suggestions {
+					if existing == repo.Name {
+						found = true
+						break
+					}
+				}
+				if !found {
+					suggestions = append(suggestions, repo.Name)
+					if len(suggestions) >= 5 {
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return suggestions
+}
+
+// fuzzyMatch checks if all characters in input appear in order in target
+func fuzzyMatch(input, target string) bool {
+	if len(input) == 0 {
+		return true
+	}
+	if len(input) > len(target) {
+		return false
+	}
+
+	inputIndex := 0
+	for _, char := range target {
+		if inputIndex < len(input) && rune(input[inputIndex]) == char {
+			inputIndex++
+		}
+	}
+
+	return inputIndex == len(input)
+}
+
+// Helper function to check if input is a command
+func isCommand(input string) bool {
+	commands := []string{"help", "h", "list", "config", "refresh", "exit", "quit", "q"}
+	for _, cmd := range commands {
+		if input == cmd {
+			return true
+		}
+	}
+	return false
 }
