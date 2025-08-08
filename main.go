@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 	"github.com/chzyer/readline"
 )
 
@@ -49,8 +50,14 @@ func main() {
 	scanDir := func(path string, info os.FileInfo, err error) error {
 		if info != nil && info.IsDir() {
 			dirName := info.Name()
+
+			// Skip directories starting with "." except for ".git"
+			if strings.HasPrefix(dirName, ".") && dirName != ".git" {
+				return filepath.SkipDir
+			}
+
 			// List of directories to skip
-            skipDirs := []string{"node_modules", "src", "dist", "deploy_node_modules", ".serverless", ".github", "config", "features", "build", "bin", "lib", "logs", "tmp", "temp", "env", "venv", ".vscode", ".idea", "public", "utils", ".esbuild", "settings", "secrets", "dagrams", "export", "images", "data", "test", "tests", "doc", "docs", "distros", "demo", "demos", "examples", "backup", "scripts", "assets", "archive", "installers", "locale", "install", "logs", "packages", "resources", "themes", "translations", "uploads", "videos", "webroot"}
+			skipDirs := []string{"node_modules", "src", "dist", "deploy_node_modules", ".serverless", ".github", "config", "features", "build", "bin", "lib", "logs", "tmp", "temp", "env", "venv", ".vscode", ".idea", "public", "utils", ".esbuild", "settings", "secrets", "dagrams", "export", "images", "data", "test", "tests", "doc", "docs", "distros", "demo", "demos", "examples", "backup", "scripts", "assets", "archive", "installers", "locale", "install", "logs", "packages", "resources", "themes", "translations", "uploads", "videos", "webroot"}
 			folderCount++ // Increment folder count
 
 			// Check if the current directory is in the list of directories to skip
