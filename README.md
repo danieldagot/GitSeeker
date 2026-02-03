@@ -20,7 +20,7 @@ A fast, configurable command-line tool to find and open Git repositories in your
 ```bash
 git clone https://github.com/yourusername/GitSeeker.git
 cd GitSeeker
-go build -o gitseeker
+go build -o gs
 ```
 
 ### Using Go Install
@@ -33,22 +33,25 @@ go install github.com/yourusername/GitSeeker@latest
 ### Basic Usage
 ```bash
 # Start interactive mode
-./gitseeker
+./gs
+
+# Open a project directly
+./gs my-project
 
 # List all repositories
-./gitseeker -list
+./gs -list
 
 # Use cached results (faster)
-./gitseeker -cache
+./gs -cache
 
 # Verbose output
-./gitseeker -v
+./gs -v
 
 # Use different editor
-./gitseeker -editor vim
+./gs -editor vim
 
 # Show configuration
-./gitseeker -config
+./gs -config
 ```
 
 ### Command Line Flags
@@ -73,6 +76,29 @@ go install github.com/yourusername/GitSeeker@latest
 | `refresh` | Refresh repository list |
 | `exit`, `quit`, `q` | Exit the program |
 | `<project-name>` | Open project in configured editor |
+
+## Zsh Completion
+
+### Install
+1) Copy the completion file:
+```bash
+mkdir -p ~/.zsh/completions
+cp completions/_gs ~/.zsh/completions/_gs
+```
+
+2) Ensure your `~/.zshrc` loads completions:
+```bash
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit
+compinit
+```
+
+3) Reload your shell or run:
+```bash
+source ~/.zshrc
+```
+
+Completion uses cached repositories when available. If you add new projects, run `gs -refresh`.
 
 ## Configuration
 
@@ -117,7 +143,7 @@ GitSeeker uses a JSON configuration file located at `~/.gitseeker/config.json`.
 
 ### Basic Interactive Session
 ```
-$ ./gitseeker
+$ ./gs
 Found 15 Git repositories. Type a project name and press Tab for autocompletion.
 Type 'help' for available commands.
 
@@ -131,7 +157,7 @@ Successfully opened project: my-project
 
 ### Listing Repositories
 ```
-$ ./gitseeker -list
+$ ./gs -list
 Found 15 Git repositories:
   1. awesome-app
      /Users/username/Documents/awesome-app
@@ -142,7 +168,7 @@ Found 15 Git repositories:
 
 ### Using Cache
 ```
-$ ./gitseeker -cache -v
+$ ./gs -cache -v
 Using cached results...
 Found 15 Git repositories. Type a project name and press Tab for autocompletion.
 ```
@@ -151,12 +177,22 @@ Found 15 Git repositories. Type a project name and press Tab for autocompletion.
 
 ### Development Build
 ```bash
-go build -o gitseeker
+go build -o gs
+```
+
+### Install (binary + zsh completion)
+```bash
+make install
+```
+
+### Install to custom prefix
+```bash
+make install PREFIX=$HOME/.local
 ```
 
 ### Production Build
 ```bash
-go build -ldflags "-s -w" -o gitseeker
+go build -ldflags "-s -w" -o gs
 ```
 
 ### Cross-Platform Builds
@@ -165,10 +201,10 @@ go build -ldflags "-s -w" -o gitseeker
 GOOS=windows GOARCH=amd64 go build -o gitseeker.exe
 
 # macOS
-GOOS=darwin GOARCH=amd64 go build -o gitseeker-mac
+GOOS=darwin GOARCH=amd64 go build -o gs-mac
 
 # Linux
-GOOS=linux GOARCH=amd64 go build -o gitseeker-linux
+GOOS=linux GOARCH=amd64 go build -o gs-linux
 ```
 
 ## Dependencies

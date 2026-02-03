@@ -1,0 +1,27 @@
+#compdef gs
+
+_gs() {
+  local -a repo_list
+  repo_list=(${(f)"$(gs -completion-list 2>/dev/null)"})
+
+  _arguments -s \
+    '(-l --list)'{-l,--list}'[List all Git repositories and exit]' \
+    '(-v --ver)'{-v,--ver}'[Enable verbose logging]' \
+    '--cache[Use cached results (faster startup)]' \
+    '--refresh[Force refresh cache]' \
+    '--config[Show configuration file location and exit]' \
+    '--editor[Override default editor]' \
+    '--depth[Maximum scan depth (0 = use config default)]' \
+    '--completion-list[Print completion candidates and exit]' \
+    '*:repository:->repos'
+
+  case $state in
+    repos)
+      if (( ${#repo_list} > 0 )); then
+        compadd -a repo_list
+      fi
+      ;;
+  esac
+}
+
+_gs "$@"

@@ -23,13 +23,14 @@ type Config = utils.Config
 type Scanner = utils.Scanner
 
 var (
-	verboseFlag  bool
-	listFlag     bool
-	configFlag   bool
-	cacheFlag    bool
-	refreshFlag  bool
-	editorFlag   string
-	maxDepthFlag int
+	verboseFlag    bool
+	listFlag       bool
+	configFlag     bool
+	cacheFlag      bool
+	refreshFlag    bool
+	completionFlag bool
+	editorFlag     string
+	maxDepthFlag   int
 )
 
 func main() {
@@ -40,6 +41,7 @@ func main() {
 	flag.BoolVar(&configFlag, "config", false, "Show configuration file location and exit")
 	flag.BoolVar(&cacheFlag, "cache", false, "Use cached results (faster startup)")
 	flag.BoolVar(&refreshFlag, "refresh", false, "Force refresh cache")
+	flag.BoolVar(&completionFlag, "completion-list", false, "Print completion candidates and exit")
 	flag.StringVar(&editorFlag, "editor", "", "Override default editor (e.g., 'code', 'subl', 'vim')")
 	flag.IntVar(&maxDepthFlag, "depth", 0, "Maximum scan depth (0 = use config default)")
 	flag.Parse()
@@ -62,6 +64,16 @@ func main() {
 	// Handle config flag
 	if configFlag {
 		showConfigInfo(config)
+		return
+	}
+
+	if completionFlag {
+		printCompletionList(config)
+		return
+	}
+
+	if args := flag.Args(); len(args) > 0 {
+		openProjectByArg(args[0], config)
 		return
 	}
 
@@ -119,6 +131,68 @@ func main() {
 
 	// Start interactive mode
 	startInteractiveMode(result.Repositories, config)
+}
+
+func printCompletionList(config utils.Config) {
+	repos, err := loadRepositoriesForCli(config)
+	if err != nil {
+		return
+	}
+
+	sort.Slice(repos, func(i, j int) bool {
+		return strings.ToLower(repos[i].Name) < strings.ToLower(repos[j].Name)
+	})
+
+	for _, dir := range repos {
+		fmt.Println(dir.Name)
+	}
+}
+
+func loadRepositoriesForCli(config utils.Config) ([]Directory, error) {
+	if cached := utils.LoadCache(); cached != nil && len(cached.Repositories) > 0 {
+		return cached.Repositories, nil
+	}
+
+	scanner := utils.NewScanner(config, verboseFlag)
+	result := scanner.ScanRepositories()
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	_ = utils.SaveCache(&result)
+	return result.Repositories, nil
+}
+
+func openProjectByArg(input string, config utils.Config) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return
+	}
+
+	repos, err := loadRepositoriesForCli(config)
+	if err != nil {
+		fmt.Printf("Error loading repositories: %v\n", err)
+		return
+	}
+
+	for _, dir := range repos {
+		if dir.Name == input {
+			fmt.Printf("Opening %s at: %s\n", config.Editor, dir.Path)
+			if err := openInEditor(dir.Path, config.Editor); err != nil {
+				fmt.Printf("Error opening %s: %v\n", config.Editor, err)
+				fmt.Printf("Make sure %s is installed and available in PATH\n", config.Editor)
+				return
+			}
+			fmt.Printf("Successfully opened project: %s\n", input)
+			return
+		}
+	}
+
+	fmt.Printf("Project '%s' not found.\n", input)
+	suggestions := findSimilarNames(input, repos)
+	if len(suggestions) > 0 {
+		fmt.Printf("Did you mean: %s\n", strings.Join(suggestions, ", "))
+	}
+	fmt.Printf("Use Tab for autocompletion or type 'gs -list' to see all projects.\n")
 }
 
 func startInteractiveMode(repos []Directory, config utils.Config) {
@@ -190,7 +264,7 @@ func startInteractiveMode(repos []Directory, config utils.Config) {
 		if len(trimmedLine) > 0 && !isCommand(trimmedLine) {
 			if _, exists := dirMap[trimmedLine]; !exists {
 				suggestions := findSimilarNames(trimmedLine, repos)
-				fmt.Printf("suggestions: %s\n", suggestions) 
+				fmt.Printf("suggestions: %s\n", suggestions)
 				if len(suggestions) > 0 {
 					fmt.Printf("%sMatching repositories:%s %s%s%s\n",
 						colorGray, colorReset, colorCyan, strings.Join(suggestions, ", "), colorReset)
