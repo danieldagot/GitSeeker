@@ -65,6 +65,8 @@ go install github.com/yourusername/GitSeeker@latest
 | `-config` | | Show configuration file location and exit |
 | `-editor` | | Override default editor (e.g., 'code', 'subl', 'vim') |
 | `-depth` | | Maximum scan depth (0 = use config default) |
+| `-install` | | Install binary to ~/.local/bin and zsh completions |
+| `-uninstall` | | Remove installed binary and zsh completions |
 
 ### Interactive Mode Commands
 
@@ -79,24 +81,58 @@ go install github.com/yourusername/GitSeeker@latest
 
 ## Zsh Completion
 
-### Install
-1) Copy the completion file:
+### Quick Install
+
+The easiest way to install is with the built-in flag:
+```bash
+./gs -install
+```
+
+This will:
+1. Copy the binary to `~/.local/bin/gs`
+2. Install zsh completions to `~/.zsh/completions/_gs`
+3. Detect **Oh My Zsh** and configure completions correctly (adds `fpath` before `source $ZSH/oh-my-zsh.sh`)
+4. For non-Oh My Zsh setups, offer to add `fpath`, `compinit`, and `autoload` to your `~/.zshrc`
+5. Offer to add `~/.local/bin` to your `PATH` if it's missing
+
+Each step asks for confirmation before modifying your `~/.zshrc`.
+
+### Manual Install
+
+If you prefer to set things up yourself:
+
+1. Copy the completion file:
 ```bash
 mkdir -p ~/.zsh/completions
 cp completions/_gs ~/.zsh/completions/_gs
 ```
 
-2) Ensure your `~/.zshrc` loads completions:
+2. Add to your `~/.zshrc`:
+
+**With Oh My Zsh** — add this line *before* `source $ZSH/oh-my-zsh.sh`:
+```bash
+fpath=(~/.zsh/completions $fpath)
+```
+
+**Without Oh My Zsh** — add these lines:
 ```bash
 fpath=(~/.zsh/completions $fpath)
 autoload -Uz compinit
 compinit
 ```
 
-3) Reload your shell or run:
+3. Reload your shell:
 ```bash
 source ~/.zshrc
 ```
+
+### Uninstall
+
+```bash
+gs -uninstall
+```
+
+This removes the binary and completion file. You may also want to remove the `fpath` and `PATH` entries from your `~/.zshrc`.
 
 Completion uses cached repositories when available. If you add new projects, run `gs -refresh`.
 

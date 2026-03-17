@@ -13,6 +13,8 @@ _gs() {
     '--editor[Override default editor]' \
     '--depth[Maximum scan depth (0 = use config default)]' \
     '--completion-list[Print completion candidates and exit]' \
+    '--install[Install binary to ~/.local/bin and zsh completions]' \
+    '--uninstall[Remove installed binary and zsh completions]' \
     '*:repository:->repos'
 
   case $state in

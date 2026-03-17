@@ -2,12 +2,15 @@
 package main
 
 import (
+	"bufio"
+	"embed"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -16,6 +19,9 @@ import (
 
 	"github.com/chzyer/readline"
 )
+
+//go:embed completions/_gs
+var embeddedCompletionFile embed.FS
 
 // Directory struct to hold the name and path
 type Directory = utils.Directory
@@ -30,6 +36,8 @@ var (
 	cacheFlag      bool
 	refreshFlag    bool
 	completionFlag bool
+	installFlag    bool
+	uninstallFlag  bool
 	editorFlag     string
 	maxDepthFlag   int
 )
@@ -43,6 +51,8 @@ func main() {
 	flag.BoolVar(&cacheFlag, "cache", false, "Use cached results (faster startup)")
 	flag.BoolVar(&refreshFlag, "refresh", false, "Force refresh cache")
 	flag.BoolVar(&completionFlag, "completion-list", false, "Print completion candidates and exit")
+	flag.BoolVar(&installFlag, "install", false, "Install binary to ~/.local/bin and zsh completions")
+	flag.BoolVar(&uninstallFlag, "uninstall", false, "Remove installed binary and zsh completions")
 	flag.StringVar(&editorFlag, "editor", "", "Override default editor (e.g., 'code', 'subl', 'vim')")
 	flag.IntVar(&maxDepthFlag, "depth", 0, "Maximum scan depth (0 = use config default)")
 	flag.Parse()
@@ -65,6 +75,16 @@ func main() {
 	// Handle config flag
 	if configFlag {
 		showConfigInfo(config)
+		return
+	}
+
+	if installFlag {
+		installCompletions()
+		return
+	}
+
+	if uninstallFlag {
+		uninstall()
 		return
 	}
 
@@ -161,6 +181,243 @@ func loadRepositoriesForCli(config utils.Config) ([]Directory, error) {
 	}
 	_ = utils.SaveCache(&result)
 	return result.Repositories, nil
+}
+
+func installCompletions() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("Error: could not determine home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	installBinary(homeDir)
+	installZshCompletions(homeDir)
+}
+
+func installBinary(homeDir string) {
+	binDir := filepath.Join(homeDir, ".local", "bin")
+	destBin := filepath.Join(binDir, "gs")
+
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Printf("Error: could not determine executable path: %v\n", err)
+		os.Exit(1)
+	}
+	self, _ = filepath.EvalSymlinks(self)
+
+	if existing, err := filepath.EvalSymlinks(destBin); err == nil && existing == self {
+		fmt.Printf("Binary already installed at %s\n", destBin)
+	} else {
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			fmt.Printf("Error: could not create directory %s: %v\n", binDir, err)
+			os.Exit(1)
+		}
+
+		srcData, err := os.ReadFile(self)
+		if err != nil {
+			fmt.Printf("Error: could not read binary: %v\n", err)
+			os.Exit(1)
+		}
+
+		if err := os.WriteFile(destBin, srcData, 0755); err != nil {
+			fmt.Printf("Error: could not write binary to %s: %v\n", destBin, err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Installed binary to %s\n", destBin)
+	}
+
+	checkPathContains(homeDir, binDir)
+}
+
+func askUser(prompt string) bool {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("%s [y/N]: ", prompt)
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	return answer == "y" || answer == "yes"
+}
+
+func checkPathContains(homeDir, dir string) {
+	pathEnv := os.Getenv("PATH")
+	for _, p := range filepath.SplitList(pathEnv) {
+		if p == dir {
+			return
+		}
+	}
+
+	fmt.Printf("\nWarning: %s is not in your PATH.\n", dir)
+
+	zshrcPath := filepath.Join(homeDir, ".zshrc")
+	exportLine := fmt.Sprintf("export PATH=\"%s:$PATH\"", dir)
+
+	if data, err := os.ReadFile(zshrcPath); err == nil {
+		if strings.Contains(string(data), dir) {
+			fmt.Println("It appears to already be in your ~/.zshrc. Restart your shell to apply.")
+			return
+		}
+	}
+
+	if askUser("Would you like to add it to your ~/.zshrc?") {
+		f, err := os.OpenFile(zshrcPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Printf("Error: could not open ~/.zshrc: %v\n", err)
+			fmt.Printf("Add this manually to your ~/.zshrc:\n  %s\n", exportLine)
+			return
+		}
+		defer f.Close()
+
+		if _, err := f.WriteString("\n" + exportLine + "\n"); err != nil {
+			fmt.Printf("Error: could not write to ~/.zshrc: %v\n", err)
+			return
+		}
+		fmt.Println("Added PATH entry to ~/.zshrc.")
+		fmt.Println("Run 'source ~/.zshrc' or restart your shell to apply.")
+	} else {
+		fmt.Printf("Add this to your ~/.zshrc manually:\n  %s\n", exportLine)
+	}
+}
+
+func installZshCompletions(homeDir string) {
+	destDir := filepath.Join(homeDir, ".zsh", "completions")
+	destFile := filepath.Join(destDir, "_gs")
+
+	if _, err := os.Stat(destFile); err == nil {
+		fmt.Printf("Zsh completions already installed at %s\n", destFile)
+		checkZshrcFpath(homeDir)
+		return
+	}
+
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		fmt.Printf("Error: could not create directory %s: %v\n", destDir, err)
+		os.Exit(1)
+	}
+
+	data, err := embeddedCompletionFile.ReadFile("completions/_gs")
+	if err != nil {
+		fmt.Printf("Error: could not read embedded completion file: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(destFile, data, 0644); err != nil {
+		fmt.Printf("Error: could not write completion file to %s: %v\n", destFile, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Installed zsh completions to %s\n", destFile)
+	checkZshrcFpath(homeDir)
+}
+
+func checkZshrcFpath(homeDir string) {
+	zshrcPath := filepath.Join(homeDir, ".zshrc")
+	fpathLine := "fpath=(~/.zsh/completions $fpath)"
+
+	data, err := os.ReadFile(zshrcPath)
+	if err != nil {
+		fmt.Println("\nNo ~/.zshrc found.")
+		if askUser("Would you like to create one with completion support?") {
+			content := fpathLine + "\nautoload -Uz compinit\ncompinit\n"
+			if err := os.WriteFile(zshrcPath, []byte(content), 0644); err != nil {
+				fmt.Printf("Error: could not create ~/.zshrc: %v\n", err)
+				return
+			}
+			fmt.Println("Created ~/.zshrc with completion support.")
+		} else {
+			fmt.Println("Add the following to your shell config manually:")
+			fmt.Printf("  %s\n", fpathLine)
+			fmt.Println("  autoload -Uz compinit")
+			fmt.Println("  compinit")
+		}
+		return
+	}
+
+	content := string(data)
+
+	if strings.Contains(content, ".zsh/completions") {
+		fmt.Println("Your ~/.zshrc already references ~/.zsh/completions.")
+		fmt.Println("Run 'source ~/.zshrc' or restart your shell to pick up changes.")
+		return
+	}
+
+	isOhMyZsh := strings.Contains(content, "oh-my-zsh.sh")
+
+	if isOhMyZsh {
+		fmt.Println("\nOh My Zsh detected. The fpath line needs to be added before 'source $ZSH/oh-my-zsh.sh'.")
+		if askUser("Would you like to add it automatically?") {
+			newContent := strings.Replace(content, "source $ZSH/oh-my-zsh.sh", fpathLine+"\nsource $ZSH/oh-my-zsh.sh", 1)
+			if err := os.WriteFile(zshrcPath, []byte(newContent), 0644); err != nil {
+				fmt.Printf("Error: could not update ~/.zshrc: %v\n", err)
+				return
+			}
+			fmt.Println("Added fpath entry to ~/.zshrc (before Oh My Zsh source).")
+			fmt.Println("Run 'source ~/.zshrc' or restart your shell to apply.")
+		} else {
+			fmt.Printf("Add this line before 'source $ZSH/oh-my-zsh.sh' in your ~/.zshrc:\n  %s\n", fpathLine)
+		}
+	} else {
+		fmt.Println("\nCompletions need fpath and compinit configuration in ~/.zshrc.")
+		if askUser("Would you like to add it automatically?") {
+			f, err := os.OpenFile(zshrcPath, os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Printf("Error: could not open ~/.zshrc: %v\n", err)
+				return
+			}
+			defer f.Close()
+
+			lines := "\n" + fpathLine + "\nautoload -Uz compinit\ncompinit\n"
+			if _, err := f.WriteString(lines); err != nil {
+				fmt.Printf("Error: could not write to ~/.zshrc: %v\n", err)
+				return
+			}
+			fmt.Println("Added completion support to ~/.zshrc.")
+			fmt.Println("Run 'source ~/.zshrc' or restart your shell to apply.")
+		} else {
+			fmt.Println("Add the following to your ~/.zshrc manually:")
+			fmt.Printf("  %s\n", fpathLine)
+			fmt.Println("  autoload -Uz compinit")
+			fmt.Println("  compinit")
+		}
+	}
+}
+
+func uninstall() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("Error: could not determine home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	removed := 0
+
+	binPath := filepath.Join(homeDir, ".local", "bin", "gs")
+	if _, err := os.Stat(binPath); err == nil {
+		if err := os.Remove(binPath); err != nil {
+			fmt.Printf("Error: could not remove %s: %v\n", binPath, err)
+		} else {
+			fmt.Printf("Removed %s\n", binPath)
+			removed++
+		}
+	} else {
+		fmt.Printf("Binary not found at %s (skipped)\n", binPath)
+	}
+
+	compPath := filepath.Join(homeDir, ".zsh", "completions", "_gs")
+	if _, err := os.Stat(compPath); err == nil {
+		if err := os.Remove(compPath); err != nil {
+			fmt.Printf("Error: could not remove %s: %v\n", compPath, err)
+		} else {
+			fmt.Printf("Removed %s\n", compPath)
+			removed++
+		}
+	} else {
+		fmt.Printf("Completions not found at %s (skipped)\n", compPath)
+	}
+
+	if removed > 0 {
+		fmt.Println("\nUninstall complete. You may also want to remove the PATH and fpath entries from ~/.zshrc.")
+	} else {
+		fmt.Println("\nNothing to uninstall.")
+	}
 }
 
 func openProjectByArg(input string, config utils.Config) {
