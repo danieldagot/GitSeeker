@@ -1,3 +1,4 @@
+// main.go - Main package for GitSeeker
 package main
 
 import (
